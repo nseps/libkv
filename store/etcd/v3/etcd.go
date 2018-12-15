@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	etcd "github.com/coreos/etcd/clientv3"
-	"github.com/coreos/etcd/clientv3/concurrency"
-	"github.com/docker/libkv"
-	"github.com/docker/libkv/store"
+	"github.com/thegrumpylion/libkv"
+	"github.com/thegrumpylion/libkv/store"
+	etcd "go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/clientv3/concurrency"
 )
 
 const (
