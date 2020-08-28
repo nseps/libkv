@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/tls"
 	"errors"
+	"os"
 	"time"
 )
 
@@ -22,6 +23,8 @@ const (
 	BOLTDB Backend = "boltdb"
 	// REDIS backend
 	REDIS Backend = "redis"
+	// FS backend
+	FS Backend = "fs"
 )
 
 var (
@@ -120,6 +123,7 @@ type KVPair struct {
 type WriteOptions struct {
 	IsDir bool
 	TTL   time.Duration
+	Mode  os.FileMode
 }
 
 // ReadOptions contains optional request parameters
