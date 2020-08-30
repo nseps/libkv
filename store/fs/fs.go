@@ -509,7 +509,7 @@ func (s *FS) WatchTree(directory string, stopCh <-chan struct{}, opts *store.Rea
 }
 
 func (s *FS) NewLock(key string, opts *store.LockOptions) (store.Locker, error) {
-	panic("not implemented")
+	return nil, store.ErrCallNotSupported
 }
 
 func (s *FS) List(directory string, opts *store.ReadOptions) ([]*store.KVPair, error) {
@@ -698,6 +698,7 @@ func (s *FS) Close() {
 	s.fileLock.f.Close()
 }
 
+// openRdLk opens file at "path" and tries to acuire a read lock on it
 func openRdLk(path string) (*os.File, *unix.Flock_t, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -713,6 +714,7 @@ func openRdLk(path string) (*os.File, *unix.Flock_t, error) {
 	return f, lk, nil
 }
 
+// openWrLk opens file at "path" and tries to acuire a write lock on it
 func openWrLk(path string) (*os.File, *unix.Flock_t, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
 	if err != nil {
@@ -728,6 +730,7 @@ func openWrLk(path string) (*os.File, *unix.Flock_t, error) {
 	return f, lk, nil
 }
 
+// closeUnlk closes the file and releases the lock
 func closeUnlk(f *os.File, lk *unix.Flock_t) error {
 	lk.Type = unix.F_UNLCK
 	err := unix.FcntlFlock(f.Fd(), unix.F_SETLKW, lk)
