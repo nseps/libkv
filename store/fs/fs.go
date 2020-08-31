@@ -24,49 +24,9 @@ var (
 
 // FS Filesystem store
 type FS struct {
-	fileLock
-	path string
-}
-
-type fileLock struct {
-	f   *os.File
-	rwm sync.RWMutex
-}
-
-func (l *fileLock) Lock() error {
-	l.rwm.Lock()
-
-	lk := &unix.Flock_t{
-		Type: unix.F_WRLCK,
-	}
-	return unix.FcntlFlock(l.f.Fd(), unix.F_SETLKW, lk)
-}
-
-func (l *fileLock) Unlock() error {
-	l.rwm.Unlock()
-
-	lk := &unix.Flock_t{
-		Type: unix.F_UNLCK,
-	}
-	return unix.FcntlFlock(l.f.Fd(), unix.F_SETLKW, lk)
-}
-
-func (l *fileLock) RLock() error {
-	l.rwm.RLock()
-
-	lk := &unix.Flock_t{
-		Type: unix.F_RDLCK,
-	}
-	return unix.FcntlFlock(l.f.Fd(), unix.F_SETLKW, lk)
-}
-
-func (l *fileLock) RUnlock() error {
-	l.rwm.RUnlock()
-
-	lk := &unix.Flock_t{
-		Type: unix.F_UNLCK,
-	}
-	return unix.FcntlFlock(l.f.Fd(), unix.F_SETLKW, lk)
+	sync.Mutex
+	locks map[string]*sync.RWMutex
+	path  string
 }
 
 // New creates a Filesystem store
@@ -90,18 +50,25 @@ func New(endpoints []string, opts *store.Config) (store.Store, error) {
 		}
 	}
 
-	// create or open lockfile
-	f, err := os.OpenFile(filepath.Join(path, ".dblock"), os.O_RDWR|os.O_CREATE, 644)
-	if err != nil {
-		return nil, err
-	}
-
 	return &FS{
-		fileLock: fileLock{
-			f: f,
-		},
-		path: path,
+		locks: map[string]*sync.RWMutex{},
+		path:  filepath.Clean(path),
 	}, nil
+}
+
+func (s *FS) getLock(key string) *sync.RWMutex {
+	s.Lock()
+	defer s.Unlock()
+	if _, ok := s.locks[key]; !ok {
+		s.locks[key] = &sync.RWMutex{}
+	}
+	return s.locks[key]
+}
+
+func (s *FS) removeLock(key string) {
+	s.Lock()
+	defer s.Unlock()
+	delete(s.locks, key)
 }
 
 // Lock Filesystem implementation of Locker
@@ -251,8 +218,17 @@ func (s *FS) delete(p string, comp uint64) error {
 		return err
 	}
 
-	// best effor if original path is a dir
-	os.Remove(p)
+	// remove empty directories backwards
+	for {
+		err = os.Remove(p)
+		if err != nil {
+			break
+		}
+		p = filepath.Dir(p)
+		if p == s.path {
+			break
+		}
+	}
 
 	return closeUnlk(f, lk)
 }
@@ -262,22 +238,12 @@ func (s *FS) list() {
 }
 
 func (s *FS) Get(key string, opts *store.ReadOptions) (*store.KVPair, error) {
-	err := s.RLock()
-	if err != nil {
-		return nil, err
-	}
-	locked := true
-	defer func() {
-		if locked {
-			s.RUnlock()
-		}
-	}()
-
 	if !isValid(key) {
 		return nil, ErrDoubleDotPathNotAllowed
 	}
+	k := normalize(key)
 
-	p := filepath.Join(s.path, normalize(key))
+	p := filepath.Join(s.path, k)
 
 	exists, p, inf, err := s.exist(p)
 	if err != nil {
@@ -287,31 +253,23 @@ func (s *FS) Get(key string, opts *store.ReadOptions) (*store.KVPair, error) {
 		return nil, store.ErrKeyNotFound
 	}
 
+	l := s.getLock(k)
+	l.RLock()
+	defer l.RUnlock()
+
 	data, err := s.get(p)
 	if err != nil {
 		return nil, err
 	}
 
-	locked = false
 	return &store.KVPair{
 		Key:       key,
 		Value:     data,
 		LastIndex: uint64(inf.ModTime().Unix()),
-	}, s.RUnlock()
+	}, nil
 }
 
 func (s *FS) Put(key string, value []byte, opts *store.WriteOptions) error {
-	err := s.Lock()
-	if err != nil {
-		return err
-	}
-	locked := true
-	defer func() {
-		if locked {
-			s.Unlock()
-		}
-	}()
-
 	if !isValid(key) {
 		return ErrDoubleDotPathNotAllowed
 	}
@@ -324,40 +282,37 @@ func (s *FS) Put(key string, value []byte, opts *store.WriteOptions) error {
 		}
 	}
 
-	_, err = s.put(filepath.Join(s.path, key), value, m)
+	l := s.getLock(key)
+	l.Lock()
+	defer l.Unlock()
+
+	_, err := s.put(filepath.Join(s.path, key), value, m)
 	if err != nil {
 		return err
 	}
 
-	locked = false
-	return s.Unlock()
+	return nil
 }
 
 func (s *FS) Delete(key string) error {
-	err := s.Lock()
-	if err != nil {
-		return err
-	}
-	locked := true
-	defer func() {
-		if locked {
-			s.Unlock()
-		}
-	}()
-
 	if !isValid(key) {
 		return ErrDoubleDotPathNotAllowed
 	}
+	key = normalize(key)
 
-	p := filepath.Join(s.path, normalize(key))
+	p := filepath.Join(s.path, key)
 
-	err = s.delete(p, 0)
-	if err != nil {
+	l := s.getLock(key)
+	l.Lock()
+	defer l.Unlock()
+
+	if err := s.delete(p, 0); err != nil {
 		return err
 	}
 
-	locked = false
-	return s.Unlock()
+	s.removeLock(key)
+
+	return nil
 }
 
 func (s *FS) Exists(key string, opts *store.ReadOptions) (bool, error) {
@@ -496,7 +451,7 @@ func (s *FS) WatchTree(directory string, stopCh <-chan struct{}, opts *store.Rea
 					}
 					idx = uint64(inf.ModTime().Unix())
 				}
-				chn <- []*store.KVPair{&store.KVPair{
+				chn <- []*store.KVPair{{
 					Key:       strings.TrimPrefix(ev.Path(), s.path),
 					Value:     data,
 					LastIndex: idx,
@@ -513,17 +468,6 @@ func (s *FS) NewLock(key string, opts *store.LockOptions) (store.Locker, error) 
 }
 
 func (s *FS) List(directory string, opts *store.ReadOptions) ([]*store.KVPair, error) {
-	err := s.RLock()
-	if err != nil {
-		return nil, err
-	}
-	locked := true
-	defer func() {
-		if locked {
-			s.RUnlock()
-		}
-	}()
-
 	if !isValid(directory) {
 		return nil, ErrDoubleDotPathNotAllowed
 	}
@@ -536,28 +480,38 @@ func (s *FS) List(directory string, opts *store.ReadOptions) ([]*store.KVPair, e
 		return nil, store.ErrKeyNotFound
 	}
 
-	err = filepath.Walk(p, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(p, func(path string, info os.FileInfo, err error) error {
 		if path == p {
 			return nil
 		}
 		if info.Mode().IsRegular() {
-			f, lk, err := openRdLk(path)
-			if err != nil {
-				return err
-			}
+
 			name := info.Name()
 			if n, ok := isDirValue(name); ok {
 				name = n
 			}
+			key := d + "/" + name
+
+			l := s.getLock(key)
+			l.RLock()
+			defer l.RUnlock()
+
+			f, lk, err := openRdLk(path)
+			if err != nil {
+				return err
+			}
+
 			data, err := ioutil.ReadAll(f)
 			if err != nil {
 				return err
 			}
+
 			if err := closeUnlk(f, lk); err != nil {
 				return err
 			}
+
 			out = append(out, &store.KVPair{
-				Key:       d + "/" + name,
+				Key:       key,
 				Value:     data,
 				LastIndex: uint64(info.ModTime().Unix()),
 			})
@@ -568,22 +522,10 @@ func (s *FS) List(directory string, opts *store.ReadOptions) ([]*store.KVPair, e
 		return nil, err
 	}
 
-	locked = false
-	return out, s.RUnlock()
+	return out, nil
 }
 
 func (s *FS) DeleteTree(directory string) error {
-	err := s.Lock()
-	if err != nil {
-		return err
-	}
-	locked := true
-	defer func() {
-		if locked {
-			s.Unlock()
-		}
-	}()
-
 	if !isValid(directory) {
 		return ErrDoubleDotPathNotAllowed
 	}
@@ -592,7 +534,14 @@ func (s *FS) DeleteTree(directory string) error {
 	p := filepath.Join(s.path, d)
 	val := dirValue(p)
 
-	err = os.RemoveAll(p)
+	s.Lock()
+	defer s.Unlock()
+
+	for _, l := range s.locks {
+		l.Lock()
+	}
+
+	err := os.RemoveAll(p)
 	if err != nil {
 		return err
 	}
@@ -602,22 +551,12 @@ func (s *FS) DeleteTree(directory string) error {
 		return err
 	}
 
-	locked = false
-	return s.Unlock()
+	s.locks = map[string]*sync.RWMutex{}
+
+	return nil
 }
 
 func (s *FS) AtomicPut(key string, value []byte, previous *store.KVPair, opts *store.WriteOptions) (bool, *store.KVPair, error) {
-	err := s.Lock()
-	if err != nil {
-		return false, nil, err
-	}
-	locked := true
-	defer func() {
-		if locked {
-			s.Unlock()
-		}
-	}()
-
 	if !isValid(key) {
 		return false, nil, ErrDoubleDotPathNotAllowed
 	}
@@ -648,6 +587,10 @@ func (s *FS) AtomicPut(key string, value []byte, previous *store.KVPair, opts *s
 		}
 	}
 
+	l := s.getLock(key)
+	l.Lock()
+	defer l.Unlock()
+
 	inf, err = s.put(path, value, m)
 	if err != nil {
 		return false, nil, err
@@ -659,8 +602,7 @@ func (s *FS) AtomicPut(key string, value []byte, previous *store.KVPair, opts *s
 		LastIndex: uint64(inf.ModTime().Unix()),
 	}
 
-	locked = false
-	return true, updated, s.Unlock()
+	return true, updated, nil
 }
 
 func (s *FS) AtomicDelete(key string, previous *store.KVPair) (bool, error) {
@@ -668,34 +610,27 @@ func (s *FS) AtomicDelete(key string, previous *store.KVPair) (bool, error) {
 		return false, store.ErrPreviousNotSpecified
 	}
 
-	err := s.Lock()
-	if err != nil {
-		return false, err
-	}
-	locked := true
-	defer func() {
-		if locked {
-			s.Unlock()
-		}
-	}()
-
 	if !isValid(key) {
 		return false, ErrDoubleDotPathNotAllowed
 	}
 
 	p := filepath.Join(s.path, normalize(key))
 
-	err = s.delete(p, previous.LastIndex)
+	l := s.getLock(key)
+	l.Lock()
+	defer l.Unlock()
+
+	err := s.delete(p, previous.LastIndex)
 	if err != nil {
 		return false, err
 	}
 
-	locked = false
-	return true, s.Unlock()
+	s.removeLock(key)
+
+	return true, nil
 }
 
 func (s *FS) Close() {
-	s.fileLock.f.Close()
 }
 
 // openRdLk opens file at "path" and tries to acuire a read lock on it
