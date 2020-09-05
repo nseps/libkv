@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/rjeczalik/notify"
+	"github.com/thegrumpylion/libkv"
 	"github.com/thegrumpylion/libkv/store"
 )
 
@@ -27,6 +28,11 @@ type FS struct {
 	sync.Mutex
 	locks map[string]*sync.RWMutex
 	path  string
+}
+
+// Register registers fs to libkv
+func Register() {
+	libkv.AddStore(store.FS, New)
 }
 
 // New creates a Filesystem store
